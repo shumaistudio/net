@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Web Proxy</title>
+<style>
+  body{font-family:system-ui,sans-serif;display:grid;place-items:center;min-height:100vh;margin:0;background:#111;color:#eee}
+  form{display:flex;gap:8px;width:min(560px,92vw)}
+  input{flex:1;padding:12px;border-radius:8px;border:1px solid #444;background:#1c1c1c;color:#eee}
+  button{padding:12px 20px;border:0;border-radius:8px;background:#4f8cff;color:#fff;cursor:pointer}
+</style>
+</head>
+<body>
+<form id="f">
+  <input id="u" placeholder="https://example.com" autofocus>
+  <button>開く</button>
+</form>
+<script>
+  // GitHub Pages に置く場合は Vercel の URL を指定 (例: "https://my-proxy.vercel.app")
+  // Vercel 上で使う場合は空文字のままでOK
+  const API_BASE = "";
+  document.getElementById("f").addEventListener("submit", e => {
+    e.preventDefault();
+    let v = document.getElementById("u").value.trim();
+    if (!v) return;
+    if (!/^https?:\/\//i.test(v)) v = "https://" + v;
+    location.href = API_BASE + "/api/proxy?url=" + encodeURIComponent(v);
+  });
+</script>
+</body>
+</html>
