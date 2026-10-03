@@ -88,7 +88,7 @@ XMLHttpRequest.prototype.open=function(m,u){
 };
 var sa=Element.prototype.setAttribute;
 Element.prototype.setAttribute=function(n,v){
-  if(/^(src|href|poster|action)$/i.test(n)) v=px(String(v));
+  if(/^(src|href|poster)$/i.test(n)) v=px(String(v));
   return sa.call(this,n,v);
 };
 [[HTMLImageElement,"src"],[HTMLScriptElement,"src"],[HTMLMediaElement,"src"],
@@ -99,6 +99,31 @@ Element.prototype.setAttribute=function(n,v){
     get:d.get,set:function(v){d.set.call(this,px(String(v)))}
   });
 });
+
+var H=new URL(BASE).hostname.toLowerCase();
+var cd=Object.getOwnPropertyDescriptor(Document.prototype,"cookie");
+if(cd&&cd.get){Object.defineProperty(document,"cookie",{configurable:true,
+get:function(){
+  var out=[];
+  cd.get.call(document).split(/;\\s*/).forEach(function(c){
+    var i=c.indexOf("=");if(i<0)return;
+    var m=c.slice(0,i).match(/^__px_(.+?)__(.+)$/);
+    if(m&&(H===m[1]||H.endsWith("."+m[1]))) out.push(m[2]+c.slice(i));
+  });
+  return out.join("; ");
+},
+set:function(v){
+  var parts=String(v).split(";"),nv=parts.shift().trim(),eq=nv.indexOf("=");
+  if(eq<1)return;
+  var dom=H,rest=[];
+  parts.forEach(function(p){
+    var t=p.trim();
+    if(/^domain=/i.test(t)){var d=t.slice(7).replace(/^\\./,"").toLowerCase();if(H===d||H.endsWith("."+d))dom=d;}
+    else if(/^(path|samesite)=/i.test(t)||/^secure$/i.test(t)){}
+    else if(t)rest.push(t);
+  });
+  cd.set.call(document,"__px_"+dom+"__"+nv.slice(0,eq)+"="+nv.slice(eq+1)+"; path=/; SameSite=Lax; Secure"+(rest.length?"; "+rest.join("; "):""));
+}});}
 var wo=window.open;
 window.open=function(u){arguments[0]=px(u);return wo.apply(this,arguments)};
 })();</script>`;
@@ -117,7 +142,7 @@ function rewriteHtml(html, base) {
   $("[crossorigin]").removeAttr("crossorigin");
   $("[nonce]").removeAttr("nonce");
 
-  const attrs = ["src", "href", "poster", "action", "data-src", "data-href", "data-poster"];
+  const attrs = ["src", "href", "poster", "data-src", "data-href", "data-poster"];
   $("*").each((_, el) => {
     for (const a of attrs) {
       const v = $(el).attr(a);
@@ -130,6 +155,21 @@ function rewriteHtml(html, base) {
     const st = $(el).attr("style");
     if (st) $(el).attr("style", rwCss(st, base));
   });
+
+  $("form").each((_, el) => {
+    const f = $(el);
+    const a = f.attr("action");
+    if (a && SKIP.test(a)) return;
+    let u;
+    try { u = new URL(a || "", base); } catch { u = new URL(base); }
+    if ((f.attr("method") || "get").toLowerCase() === "post") {
+      f.attr("action", PROXY + encodeURIComponent(u.href));
+    } else {
+      u.search = ""; u.hash = "";
+      f.attr("action", "/api/proxy");
+      f.prepend($('<input type="hidden" name="__purl">').attr("value", u.href));
+    }
+  });
   $("style").each((_, el) => {
     $(el).text(rwCss($(el).text(), base));
   });
@@ -138,16 +178,60 @@ function rewriteHtml(html, base) {
   return $.html();
 }
 
+
+/* ---------- Cookie中継 (サイトごとに名前へプレフィックスを付けて衝突を防ぐ) ---------- */
+function buildCookie(req, host) {
+  const out = [];
+  (req.headers.cookie || "").split(/;\s*/).forEach(c => {
+    const i = c.indexOf("=");
+    if (i < 0) return;
+    const m = c.slice(0, i).match(/^__px_(.+?)__(.+)$/);
+    if (m && (host === m[1] || host.endsWith("." + m[1]))) out.push(m[2] + c.slice(i));
+  });
+  return out.join("; ");
+}
+
+function convertSetCookie(sc, host) {
+  const parts = sc.split(";").map(x => x.trim());
+  const first = parts.shift();
+  const eq = first.indexOf("=");
+  if (eq < 1) return null;
+  let dom = host;
+  const attrs = [];
+  for (const p of parts) {
+    const [k, ...r] = p.split("=");
+    const key = k.toLowerCase();
+    const v = r.join("=");
+    if (key === "domain") {
+      const d = v.replace(/^\./, "").toLowerCase();
+      if (host === d || host.endsWith("." + d)) dom = d;
+    } else if (key === "expires" || key === "max-age") attrs.push(k + "=" + v);
+    else if (key === "httponly") attrs.push("HttpOnly");
+  }
+  return `__px_${dom}__${first.slice(0, eq)}=${first.slice(eq + 1)}; Path=/; SameSite=Lax; Secure` +
+    (attrs.length ? "; " + attrs.join("; ") : "");
+}
+
 /* ---------- ハンドラ ---------- */
 module.exports = async (req, res) => {
   try {
-    const raw = req.query.url;
+    const sp = new URL(req.url, "http://localhost").searchParams;
+    let raw = sp.get("url");
+    const purl = sp.get("__purl"); // GETフォーム送信
+    if (purl) {
+      try {
+        const t = new URL(purl);
+        for (const [k, v] of sp) if (k !== "__purl") t.searchParams.append(k, v);
+        raw = t.href;
+      } catch { return res.status(400).send("invalid form url"); }
+    }
     if (!raw) return res.status(400).send("url parameter required");
 
     let target;
     try { target = new URL(raw); } catch { return res.status(400).send("invalid url"); }
     await assertPublic(target);
 
+    const method = ["POST", "HEAD"].includes(req.method) ? req.method : "GET";
     const headers = {
       "user-agent": req.headers["user-agent"] || "Mozilla/5.0",
       accept: req.headers.accept || "*/*",
@@ -155,12 +239,25 @@ module.exports = async (req, res) => {
       referer: target.origin + "/",
     };
     if (req.headers.range) headers.range = req.headers.range; // mp4のシーク用
+    const ck = buildCookie(req, target.hostname.toLowerCase());
+    if (ck) headers.cookie = ck;
 
-    const upstream = await fetch(target.href, {
-      method: req.method === "HEAD" ? "HEAD" : "GET",
-      headers,
-      redirect: "manual",
-    });
+    let body;
+    if (method === "POST") {
+      const ct = req.headers["content-type"] || "";
+      headers["content-type"] = ct;
+      headers.origin = target.origin;
+      if (Buffer.isBuffer(req.body) || typeof req.body === "string") body = req.body;
+      else if (req.body && /urlencoded/i.test(ct)) body = new URLSearchParams(req.body).toString();
+      else if (req.body) body = JSON.stringify(req.body);
+    }
+
+    const upstream = await fetch(target.href, { method, headers, body, redirect: "manual" });
+
+    // Set-Cookie をブラウザへ中継
+    const rawCookies = upstream.headers.getSetCookie ? upstream.headers.getSetCookie() : [];
+    const cookies = rawCookies.map(c => convertSetCookie(c, target.hostname.toLowerCase())).filter(Boolean);
+    if (cookies.length) res.setHeader("Set-Cookie", cookies);
 
     // リダイレクトもプロキシ経由に
     if (upstream.status >= 300 && upstream.status < 400 && upstream.headers.get("location")) {
@@ -193,7 +290,7 @@ module.exports = async (req, res) => {
     const len = upstream.headers.get("content-length");
     if (len && !encoded) res.setHeader("Content-Length", len);
 
-    if (!upstream.body || req.method === "HEAD") return res.end();
+    if (!upstream.body || method === "HEAD") return res.end();
     Readable.fromWeb(upstream.body).on("error", () => res.end()).pipe(res);
   } catch (e) {
     res.status(502).send("Proxy error: " + e.message);
